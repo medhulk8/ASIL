@@ -7,7 +7,11 @@
       "Bash(python3:*)",
       "Bash(source venv/bin/activate)",
       "Bash(python:*)",
-      "Bash(source /Users/medhul/asil_project/venv/bin/activate:*)"
+      "Bash(source /Users/medhul/asil_project/venv/bin/activate:*)",
+      "Bash(ollama list:*)",
+      "Bash(TAVILY_API_KEY=\"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\" python:*)",
+      "Bash(TAVILY_API_KEY=\"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\" python src/kg/dynamic_knowledge_graph.py:*)",
+      "Bash(ollama pull:*)"
     ]
   }
 }
