@@ -11,7 +11,9 @@
       "Bash(ollama list:*)",
       "Bash(TAVILY_API_KEY=\"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\" python:*)",
       "Bash(TAVILY_API_KEY=\"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\" python src/kg/dynamic_knowledge_graph.py:*)",
-      "Bash(ollama pull:*)"
+      "Bash(ollama pull:*)",
+      "Bash(source .venv/bin/activate:*)",
+      "Bash(export TAVILY_API_KEY=\"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\")"
     ]
   }
 }

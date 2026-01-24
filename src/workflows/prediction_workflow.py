@@ -880,13 +880,216 @@ def build_workflow(
 
 
 # ============================================================================
+# Advanced Graph Builder with Conditional Routing
+# ============================================================================
+
+def build_prediction_graph(
+    mcp_client,
+    db_path: Path,
+    kg=None,
+    web_rag=None,
+    ollama_model: str = "llama3.1:8b"
+):
+    """
+    Build and compile the complete prediction workflow graph with advanced routing.
+
+    This version includes:
+    - Conditional web search based on baseline confidence
+    - Retry loop for low-confidence predictions
+    - Iteration limiting to prevent infinite loops
+
+    Args:
+        mcp_client: Connected MCP client for database access
+        db_path: Path to SQLite database
+        kg: Knowledge graph instance
+        web_rag: WebSearchRAG instance
+        ollama_model: Ollama model name
+
+    Returns:
+        Compiled LangGraph workflow ready to invoke
+    """
+    # Create nodes with dependencies
+    nodes = create_workflow_components(mcp_client, db_path, kg, web_rag, ollama_model)
+
+    # Create graph
+    graph = StateGraph(PredictionState)
+
+    # Add all 8 nodes to graph
+    graph.add_node("match_selector", nodes['match_selector'])
+    graph.add_node("stats_collector", nodes['stats_collector'])
+    graph.add_node("kg_query", nodes['kg_query'])
+    graph.add_node("web_search", nodes['web_search'])
+    graph.add_node("llm_predictor", nodes['llm_predictor'])
+    graph.add_node("critique", nodes['critique'])
+    graph.add_node("logger", nodes['logger'])
+    graph.add_node("evaluator", nodes['evaluator'])
+
+    # Set entry point
+    graph.set_entry_point("match_selector")
+
+    # =========================================================================
+    # Wire the graph with edges
+    # =========================================================================
+
+    # Step 1: Match selector → Stats collector (always)
+    graph.add_edge("match_selector", "stats_collector")
+
+    # Step 2: Stats collector → KG query (always)
+    graph.add_edge("stats_collector", "kg_query")
+
+    # Step 3: KG query → Conditional routing (check baseline confidence)
+    def route_after_kg(state: PredictionState) -> str:
+        """
+        Decision: Should we do web search?
+
+        - If baseline is very confident (>75%), skip web search
+        - If skip_web_search flag is set, skip
+        - If there's an error, skip
+        - Otherwise, do web search for more context
+        """
+        # Check for errors or explicit skip
+        if state.get("error"):
+            return "skip_web"
+        if state.get("skip_web_search", False):
+            return "skip_web"
+
+        # Check baseline confidence
+        baseline = state.get("baseline", {})
+        if baseline:
+            max_baseline_prob = max(
+                baseline.get('home_prob', 0),
+                baseline.get('draw_prob', 0),
+                baseline.get('away_prob', 0)
+            )
+
+            verbose = state.get("verbose", True)
+            if max_baseline_prob > 0.75:
+                if verbose:
+                    print(f"   ⚡ Baseline confident ({max_baseline_prob:.0%}) - skipping web search")
+                return "skip_web"
+            else:
+                if verbose:
+                    print(f"   🔍 Baseline uncertain ({max_baseline_prob:.0%}) - doing web search")
+                return "do_web"
+
+        return "do_web"
+
+    graph.add_conditional_edges(
+        "kg_query",
+        route_after_kg,
+        {
+            "skip_web": "llm_predictor",  # Skip directly to prediction
+            "do_web": "web_search"        # Do web search first
+        }
+    )
+
+    # Step 4: Web search → LLM predictor (always, if we did web search)
+    graph.add_edge("web_search", "llm_predictor")
+
+    # Step 5: LLM predictor → Conditional routing (check prediction confidence)
+    def route_after_prediction(state: PredictionState) -> str:
+        """
+        Decision: Is LLM confident enough?
+
+        - If high confidence OR we've already retried twice, proceed to critique
+        - If low confidence AND haven't retried max times, loop back to web search
+        """
+        confidence = state.get('confidence_level', 'medium')
+        iteration_count = state.get('iteration_count', 0)
+        verbose = state.get("verbose", True)
+
+        # Always proceed if we've hit max iterations or have high confidence
+        if confidence == 'high' or iteration_count >= 2:
+            if verbose:
+                print(f"   ✓ Confidence: {confidence} (iteration {iteration_count}) - proceeding")
+            return "proceed"
+        elif confidence == 'low' and iteration_count < 2:
+            if verbose:
+                print(f"   ⚠️ Low confidence ({confidence}) - retry {iteration_count + 1}/2")
+            return "retry"
+        else:
+            # Medium confidence - proceed
+            if verbose:
+                print(f"   ✓ Confidence: {confidence} - proceeding")
+            return "proceed"
+
+    graph.add_conditional_edges(
+        "llm_predictor",
+        route_after_prediction,
+        {
+            "proceed": "critique",     # Move forward
+            "retry": "web_search"      # Loop back (with updated iteration_count)
+        }
+    )
+
+    # Step 6: Critique → Logger (always)
+    graph.add_edge("critique", "logger")
+
+    # Step 7: Logger → Evaluator (always)
+    graph.add_edge("logger", "evaluator")
+
+    # Step 8: Evaluator → END (always)
+    graph.add_edge("evaluator", END)
+
+    # Compile the graph
+    workflow = graph.compile()
+
+    return workflow
+
+
+def print_workflow_structure():
+    """Print the workflow graph structure."""
+    print("\n" + "=" * 70)
+    print(" LANGGRAPH WORKFLOW STRUCTURE")
+    print("=" * 70)
+    print("""
+    ┌─────────────────┐
+    │  match_selector │  ← Entry point
+    └────────┬────────┘
+             │
+    ┌────────▼────────┐
+    │ stats_collector │
+    └────────┬────────┘
+             │
+    ┌────────▼────────┐
+    │    kg_query     │
+    └────────┬────────┘
+             │
+             ├─── baseline > 75%? ───► skip to llm_predictor
+             │
+    ┌────────▼────────┐
+    │   web_search    │ ◄────────────┐
+    └────────┬────────┘              │
+             │                       │
+    ┌────────▼────────┐              │
+    │  llm_predictor  │              │
+    └────────┬────────┘              │
+             │                       │
+             ├─── low confidence? ───┘ (max 2 retries)
+             │
+    ┌────────▼────────┐
+    │    critique     │
+    └────────┬────────┘
+             │
+    ┌────────▼────────┐
+    │     logger      │
+    └────────┬────────┘
+             │
+    ┌────────▼────────┐
+    │    evaluator    │
+    └────────┬────────┘
+             │
+           [END]
+    """)
+
+
+# ============================================================================
 # Test
 # ============================================================================
 
 async def test_workflow():
     """Test the prediction workflow structure."""
     import sys
-    from pathlib import Path
 
     PROJECT_ROOT = Path(__file__).parent.parent.parent
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -950,19 +1153,164 @@ async def test_workflow():
     for node in nodes:
         print(f"   ✓ {node}")
 
-    print("\n5. Workflow graph structure:")
-    print("   match_selector -> stats_collector -> kg_query")
-    print("       └─[conditional]─> web_search ─┐")
-    print("       └─[skip]─────────────────────>├─> llm_predictor")
-    print("   llm_predictor -> critique -> logger -> evaluator -> END")
+    # Print workflow structure
+    print_workflow_structure()
 
     print("\n" + "=" * 70)
     print(" WORKFLOW STRUCTURE VERIFIED")
     print("=" * 70)
     print("\nTo run full workflow, use:")
-    print("  components = create_workflow_components(mcp_client, db_path, kg, web_rag)")
-    print("  workflow = create_prediction_workflow(components)")
+    print("  workflow = build_prediction_graph(mcp_client, db_path, kg, web_rag)")
     print("  result = await workflow.ainvoke({'match_id': 1, 'verbose': True})")
+
+
+async def test_full_workflow():
+    """
+    Test the complete workflow with a sample match.
+
+    Requires:
+    - TAVILY_API_KEY environment variable
+    - Ollama running with llama3.1:8b
+    - MCP server running
+    """
+    import sys
+    import os
+
+    PROJECT_ROOT = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+    print("=" * 70)
+    print(" FULL LANGGRAPH WORKFLOW TEST")
+    print("=" * 70)
+
+    # Check Tavily key
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if not tavily_key:
+        print("\n⚠️  Set TAVILY_API_KEY environment variable to run full test")
+        print("   export TAVILY_API_KEY=your_key_here")
+        return
+
+    # Check Ollama
+    print("\n1. Checking Ollama...")
+    try:
+        import ollama
+        _ = ollama.list()  # Verify connection
+        print("   ✓ Ollama connected")
+    except Exception as e:
+        print(f"   ✗ Ollama error: {e}")
+        print("   Run: ollama serve")
+        return
+
+    # Setup paths
+    db_path = PROJECT_ROOT / "data" / "processed" / "asil.db"
+    print(f"\n2. Database: {db_path}")
+    if not db_path.exists():
+        print(f"   ✗ Database not found")
+        return
+    print("   ✓ Database exists")
+
+    # Initialize components
+    print("\n3. Initializing components...")
+    try:
+        from src.kg import DynamicKnowledgeGraph
+        from src.rag import WebSearchRAG
+
+        web_rag = WebSearchRAG(tavily_api_key=tavily_key)
+        print("   ✓ WebSearchRAG initialized")
+
+        kg = DynamicKnowledgeGraph(
+            db_path=str(db_path),
+            web_rag=web_rag,
+            ollama_model="llama3.1:8b"
+        )
+        print("   ✓ DynamicKnowledgeGraph initialized")
+    except Exception as e:
+        print(f"   ✗ Component error: {e}")
+        return
+
+    # Initialize MCP client
+    print("\n4. Connecting to MCP...")
+    try:
+        # Try different import paths
+        try:
+            from src.mcp.client import MCPClient
+        except ImportError:
+            try:
+                from mcp.client import MCPClient
+            except ImportError:
+                # Fallback: look for it in the project
+                import importlib.util
+                mcp_path = PROJECT_ROOT / "src" / "mcp" / "client.py"
+                if mcp_path.exists():
+                    spec = importlib.util.spec_from_file_location("mcp_client", mcp_path)
+                    mcp_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mcp_module)
+                    MCPClient = mcp_module.MCPClient
+                else:
+                    raise ImportError("MCPClient not found")
+
+        mcp_client = MCPClient(str(db_path))
+        await mcp_client.connect()
+        print("   ✓ MCP connected")
+    except Exception as e:
+        print(f"   ✗ MCP error: {e}")
+        print("   Note: Full test requires MCP server")
+        return
+
+    # Build workflow
+    print("\n5. Building workflow...")
+    try:
+        workflow = build_prediction_graph(
+            mcp_client=mcp_client,
+            db_path=db_path,
+            kg=kg,
+            web_rag=web_rag,
+            ollama_model="llama3.1:8b"
+        )
+        print("   ✓ Workflow compiled")
+    except Exception as e:
+        print(f"   ✗ Workflow error: {e}")
+        return
+
+    # Run prediction
+    print("\n" + "=" * 70)
+    print(" RUNNING PREDICTION FOR MATCH ID=1")
+    print("=" * 70)
+
+    try:
+        result = await workflow.ainvoke({
+            "match_id": 1,
+            "verbose": True
+        })
+
+        print("\n" + "=" * 70)
+        print(" WORKFLOW COMPLETE")
+        print("=" * 70)
+
+        if result.get("prediction"):
+            pred = result["prediction"]
+            print(f"\nPrediction: H={pred['home_prob']:.1%}, "
+                  f"D={pred['draw_prob']:.1%}, "
+                  f"A={pred['away_prob']:.1%}")
+            print(f"Confidence: {pred.get('confidence', 'N/A')}")
+            print(f"Parse method: {pred.get('parse_method', 'N/A')}")
+
+        if result.get("evaluation"):
+            eval_result = result["evaluation"]
+            if eval_result.get("status") == "pending":
+                print("\nEvaluation: Match not yet played")
+            elif eval_result.get("llm_brier"):
+                print(f"\nEvaluation:")
+                print(f"  LLM Brier: {eval_result['llm_brier']:.4f}")
+                print(f"  Baseline Brier: {eval_result.get('baseline_brier', 'N/A')}")
+
+    except Exception as e:
+        print(f"\n✗ Workflow execution error: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        await mcp_client.disconnect()
 
 
 if __name__ == "__main__":
