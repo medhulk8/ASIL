@@ -502,7 +502,8 @@ class BatchEvaluator:
 async def run_batch_evaluation(
     match_ids: Optional[List[int]] = None,
     num_matches: int = 30,
-    verbose: bool = False
+    verbose: bool = False,
+    use_ensemble: bool = False
 ):
     """
     Run batch evaluation on sample matches.
@@ -517,6 +518,7 @@ async def run_batch_evaluation(
         match_ids: Optional list of specific match IDs to evaluate
         num_matches: Number of matches to sample if match_ids not provided
         verbose: Print detailed output for each match
+        use_ensemble: If True, use ensemble prediction with multiple models
     """
     import os
     import sys
@@ -527,7 +529,8 @@ async def run_batch_evaluation(
     sys.path.insert(0, str(PROJECT_ROOT))
 
     print("=" * 70)
-    print(" ASIL BATCH EVALUATION (LangGraph Workflow)")
+    mode = "Ensemble" if use_ensemble else "Single Model"
+    print(f" ASIL BATCH EVALUATION (LangGraph Workflow - {mode})")
     print("=" * 70)
 
     # Check Tavily API key
@@ -590,7 +593,8 @@ async def run_batch_evaluation(
                 db_path=db_path,
                 kg=kg,
                 web_rag=web_rag,
-                ollama_model="llama3.1:8b"
+                ollama_model="llama3.1:8b",
+                use_ensemble=use_ensemble
             )
             print("   ✓ Workflow compiled")
         except Exception as e:

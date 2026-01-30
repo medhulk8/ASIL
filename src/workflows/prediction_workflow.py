@@ -40,6 +40,7 @@ from langgraph.graph import StateGraph, END
 # Local imports
 from .confidence_calculator import ConfidenceCalculator
 from .draw_detector import DrawDetector
+from .ensemble_predictor import EnsemblePredictor
 from src.data.advanced_stats import AdvancedStatsCalculator
 
 # Setup logging
@@ -421,7 +422,8 @@ def create_workflow_components(
     db_path: Path,
     kg=None,
     web_rag=None,
-    ollama_model: str = "llama3.1:8b"
+    ollama_model: str = "llama3.1:8b",
+    use_ensemble: bool = False
 ) -> Dict[str, Callable]:
     """
     Factory function to create workflow nodes with dependencies injected.
@@ -436,11 +438,15 @@ def create_workflow_components(
         kg: Knowledge graph instance (FootballKnowledgeGraph or DynamicKnowledgeGraph)
         web_rag: WebSearchRAG instance for web searches
         ollama_model: LLM model name for Ollama
+        use_ensemble: If True, use ensemble prediction with multiple models
 
     Returns:
         Dict mapping node names to node functions ready for StateGraph
     """
     import ollama
+
+    # Initialize ensemble predictor if enabled
+    ensemble_predictor = EnsemblePredictor() if use_ensemble else None
 
     # =========================================================================
     # Node 1: match_selector_node
@@ -693,11 +699,11 @@ def create_workflow_components(
     # =========================================================================
     async def llm_predictor_node(state: PredictionState) -> PredictionState:
         """
-        Generate prediction using LLM.
+        Generate prediction using LLM (single or ensemble).
 
         Actions:
         - Build context from stats + KG + web
-        - Call Ollama for prediction
+        - Call Ollama (single model) or EnsemblePredictor (multiple models)
         - Parse response to extract probabilities
         - Calculate confidence using objective ConfidenceCalculator (not LLM self-assessment)
         """
@@ -706,24 +712,40 @@ def create_workflow_components(
         if state.get("error"):
             return {}
 
+        mode = "Ensemble" if use_ensemble else "Single"
         if verbose:
-            print("\n🤖 [LLMPredictor] Generating prediction...")
+            print(f"\n🤖 [LLMPredictor] Generating prediction ({mode} mode)...")
 
         try:
             # Build prompt from all gathered context
             prompt = _build_prediction_prompt(state)
 
-            # Call Ollama
-            response = ollama.chat(
-                model=ollama_model,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.3, "num_predict": 500}
-            )
+            # Use ensemble or single model
+            if use_ensemble and ensemble_predictor:
+                # Ensemble prediction with multiple models
+                ensemble_result = ensemble_predictor.predict_ensemble(prompt, verbose=verbose)
 
-            response_text = response["message"]["content"]
-
-            # Parse response
-            prediction = _parse_prediction_response(response_text, state["baseline"])
+                prediction = {
+                    'home_prob': ensemble_result['home_prob'],
+                    'draw_prob': ensemble_result['draw_prob'],
+                    'away_prob': ensemble_result['away_prob'],
+                    'reasoning': ensemble_result['reasoning'],
+                    'parse_method': 'ensemble',
+                    'ensemble_info': {
+                        'num_models': ensemble_result['num_models'],
+                        'ensemble_confidence': ensemble_result['ensemble_confidence'],
+                        'individual_predictions': ensemble_result['individual_predictions']
+                    }
+                }
+            else:
+                # Single model prediction (original behavior)
+                response = ollama.chat(
+                    model=ollama_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0.3, "num_predict": 500}
+                )
+                response_text = response["message"]["content"]
+                prediction = _parse_prediction_response(response_text, state["baseline"])
 
             # Calculate objective confidence using ConfidenceCalculator
             # (instead of trusting LLM self-assessment)
@@ -743,8 +765,9 @@ def create_workflow_components(
 
             if verbose:
                 print(f"   Prediction: H={prediction['home_prob']:.1%}, D={prediction['draw_prob']:.1%}, A={prediction['away_prob']:.1%}")
-                print(f"   LLM claimed: {prediction['llm_claimed_confidence']}")
-                print(f"   Calculated:  {calculated_confidence}")
+                if use_ensemble and 'ensemble_info' in prediction:
+                    print(f"   Ensemble Agreement: {prediction['ensemble_info']['ensemble_confidence']:.1%}")
+                print(f"   Calculated Confidence: {calculated_confidence}")
                 print(f"   Parse method: {prediction['parse_method']}")
 
             return {
@@ -1073,7 +1096,8 @@ def build_prediction_graph(
     db_path: Path,
     kg=None,
     web_rag=None,
-    ollama_model: str = "llama3.1:8b"
+    ollama_model: str = "llama3.1:8b",
+    use_ensemble: bool = False
 ):
     """
     Build and compile the complete prediction workflow graph with advanced routing.
@@ -1082,6 +1106,7 @@ def build_prediction_graph(
     - Conditional web search based on baseline confidence
     - Retry loop for low-confidence predictions
     - Iteration limiting to prevent infinite loops
+    - Optional ensemble prediction using multiple models
 
     Args:
         mcp_client: Connected MCP client for database access
@@ -1089,12 +1114,13 @@ def build_prediction_graph(
         kg: Knowledge graph instance
         web_rag: WebSearchRAG instance
         ollama_model: Ollama model name
+        use_ensemble: If True, use ensemble prediction with multiple models
 
     Returns:
         Compiled LangGraph workflow ready to invoke
     """
     # Create nodes with dependencies
-    nodes = create_workflow_components(mcp_client, db_path, kg, web_rag, ollama_model)
+    nodes = create_workflow_components(mcp_client, db_path, kg, web_rag, ollama_model, use_ensemble)
 
     # Create graph
     graph = StateGraph(PredictionState)
