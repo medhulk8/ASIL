@@ -16,7 +16,9 @@
       "Bash(export TAVILY_API_KEY=\"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\")",
       "Bash(/Users/medhul/asil_project/venv/bin/python:*)",
       "Bash(TAVILY_API_KEY=\"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\" /Users/medhul/asil_project/venv/bin/python:*)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(find:*)",
+      "Bash(export TAVILY_API_KEY='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')"
     ]
   }
 }

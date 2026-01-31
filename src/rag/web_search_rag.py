@@ -250,30 +250,69 @@ class WebSearchRAG:
 - **KG Confidence:** {confidence}
 """
 
+    def generate_minimal_queries(
+        self,
+        home_team: str,
+        away_team: str,
+        match_date: Optional[str] = None
+    ) -> List[str]:
+        """
+        Generate MINIMAL search queries (Phase 6 strategy).
+
+        Based on Phase 5 findings: Web searches HURT performance (-18.5% accuracy)
+        when using template queries for form/tactics that we already have in data.
+
+        ONLY searches for time-sensitive, high-impact information:
+        - Injuries/Suspensions (can't be inferred from historical stats)
+
+        Everything else (form, tactics, h2h) should come from:
+        - Historical stats database (form)
+        - Knowledge graph (tactics)
+        - Match history (h2h)
+
+        Args:
+            home_team: Name of home team
+            away_team: Name of away team
+            match_date: Optional match date (YYYY-MM-DD format)
+
+        Returns:
+            List of 1-2 highly targeted queries (NOT 5-7!)
+        """
+        year = datetime.now().year if not match_date else match_date[:4]
+
+        # ONLY search for injuries - the one thing we can't infer from stats
+        queries = [
+            f"{home_team} {away_team} injury suspension news {year} latest"
+        ]
+
+        return queries
+
     def generate_match_queries(
         self,
         home_team: str,
         away_team: str,
         match_date: Optional[str] = None,
-        kg_insights: Optional[Dict[str, Any]] = None
+        kg_insights: Optional[Dict[str, Any]] = None,
+        strategy: str = "minimal"
     ) -> List[str]:
         """
         Generate relevant search queries for a match.
-
-        Dynamically generates queries based on what information is available:
-        - Always: Recent form, injuries/suspensions
-        - Conditional: Tactics (only if KG has no tactical info)
-        - If space: Head-to-head history
 
         Args:
             home_team: Name of home team
             away_team: Name of away team
             match_date: Optional match date (YYYY-MM-DD format)
             kg_insights: Optional KG insights to conditionally skip tactics search
+            strategy: Search strategy - "full" (default, 5-7 queries) or "minimal" (1-2 queries)
 
         Returns:
-            List of search queries (5-7 queries depending on KG info)
+            List of search queries (1-2 for minimal, 5-7 for full)
         """
+        # Phase 6: Use minimal strategy by default to avoid -18.5% accuracy loss
+        if strategy == "minimal":
+            return self.generate_minimal_queries(home_team, away_team, match_date)
+
+        # Legacy full strategy (WARNING: Phase 5 showed this HURTS accuracy)
         year = datetime.now().year if not match_date else match_date[:4]
 
         queries = []
@@ -330,7 +369,8 @@ class WebSearchRAG:
         away_team: str,
         match_date: Optional[str] = None,
         max_searches: int = 5,
-        kg_insights: Optional[Dict[str, Any]] = None
+        kg_insights: Optional[Dict[str, Any]] = None,
+        strategy: str = "minimal"
     ) -> Dict[str, Any]:
         """
         Get comprehensive web context for a match.
@@ -346,17 +386,25 @@ class WebSearchRAG:
             match_date: Optional match date (YYYY-MM-DD)
             max_searches: Maximum searches to perform
             kg_insights: Optional KG insights to conditionally skip tactics search
+            strategy: Search strategy - "minimal" (default, Phase 6 recommended) or "full"
 
         Returns:
             Dictionary with search results and formatted context
 
         Example:
             >>> rag = WebSearchRAG(api_key="...")
-            >>> context = rag.get_match_context("Liverpool", "Arsenal")
+            >>> # Phase 6 recommended: minimal strategy
+            >>> context = rag.get_match_context("Liverpool", "Arsenal", strategy="minimal")
             >>> print(context["all_content"])
+
+        Note:
+            Default changed to "minimal" based on Phase 5 findings:
+            - Full strategy: 48.1% accuracy (with 5 searches)
+            - Minimal strategy: Expected ~60-65% accuracy (with 1-2 searches)
+            - Full strategy HURTS performance by adding noise from redundant searches
         """
         queries = self.generate_match_queries(
-            home_team, away_team, match_date, kg_insights=kg_insights
+            home_team, away_team, match_date, kg_insights=kg_insights, strategy=strategy
         )
         return self.execute_searches(
             queries, max_searches=max_searches, kg_insights=kg_insights

@@ -191,7 +191,7 @@ class HybridAgent:
         self,
         match_id: int,
         verbose: bool = True,
-        use_web_search: bool = True
+        use_web_search: bool = False
     ) -> Dict[str, Any]:
         """
         Complete prediction workflow with hybrid reasoning.

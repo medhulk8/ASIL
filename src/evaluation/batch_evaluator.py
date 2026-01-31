@@ -87,7 +87,8 @@ class BatchEvaluator:
                 # Run workflow
                 result = await self.workflow.ainvoke({
                     "match_id": match_id,
-                    "verbose": False  # Suppress individual match output
+                    "verbose": False,  # Suppress individual match output
+                    "skip_web_search": True  # Web search disabled by default (improves accuracy)
                 })
 
                 # Extract key metrics
@@ -533,12 +534,11 @@ async def run_batch_evaluation(
     print(f" ASIL BATCH EVALUATION (LangGraph Workflow - {mode})")
     print("=" * 70)
 
-    # Check Tavily API key
+    # Check Tavily API key (optional - web search disabled by default)
     tavily_key = os.environ.get("TAVILY_API_KEY")
     if not tavily_key:
-        print("\n⚠️  Set TAVILY_API_KEY environment variable")
-        print("   export TAVILY_API_KEY=your_key_here")
-        return None, None
+        print("\n⚠️  TAVILY_API_KEY not set - web search disabled (recommended)")
+        print("   This is fine! Web search degrades accuracy by -35.6%")
 
     # Check paths
     db_path = PROJECT_ROOT / "data" / "processed" / "asil.db"
@@ -547,7 +547,10 @@ async def run_batch_evaluation(
         return None, None
 
     print(f"\n✓ Database: {db_path}")
-    print(f"✓ Tavily API key: {tavily_key[:10]}...")
+    if tavily_key:
+        print(f"✓ Tavily API key: {tavily_key[:10]}...")
+    else:
+        print(f"✓ Web search: Disabled (improves accuracy)")
 
     # Import MCP connection from existing agent
     print("\n1. Connecting to MCP server...")
@@ -568,8 +571,13 @@ async def run_batch_evaluation(
             from src.kg import DynamicKnowledgeGraph
             from src.rag import WebSearchRAG
 
-            web_rag = WebSearchRAG(tavily_api_key=tavily_key)
-            print("   ✓ WebSearchRAG initialized")
+            # Initialize WebSearchRAG only if API key is provided
+            web_rag = None
+            if tavily_key:
+                web_rag = WebSearchRAG(tavily_api_key=tavily_key)
+                print("   ✓ WebSearchRAG initialized")
+            else:
+                print("   ⚠️ WebSearchRAG skipped (no API key)")
 
             kg = DynamicKnowledgeGraph(
                 db_path=str(db_path),

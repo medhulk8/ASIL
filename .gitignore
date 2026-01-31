@@ -53,10 +53,15 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Database files (uncomment if you don't want to commit databases)
-# *.db
-# *.sqlite
-# *.sqlite3
+# Database files
+data/cache/
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Keep main database but ignore large ones
+data/processed/*.db
+!data/processed/asil.db
 
 # Node modules (for TypeScript project)
 node_modules/
@@ -68,7 +73,22 @@ dist/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints
 
-# Data files (optional - uncomment if data files are too large)
-# data/raw/*.csv
-# data/processed/*
+# Data files - ignore large CSV files
+data/raw/*.csv
+data/raw/*.xlsx
+data/evaluation_results_*.csv
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.backup
+*_backup_*
+.cleanup_*
+
+# Test outputs
+test_results/
+*.test.db
+
+# MCP Server logs
+mcp_server.log
 

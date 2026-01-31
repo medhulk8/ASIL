@@ -1,0 +1,38 @@
+# Core Dependencies
+python>=3.8
+
+# LLM & Agents
+langchain>=0.1.0
+langchain-core>=0.1.0
+langgraph>=0.0.40
+ollama>=0.1.6
+
+# Web Search & RAG
+tavily-python>=0.3.0
+duckduckgo-search>=4.0.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+sqlite3  # Built-in with Python
+
+# Database
+sqlalchemy>=2.0.0
+
+# HTTP & API
+requests>=2.31.0
+httpx>=0.24.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# Optional: Notebook support
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Development
+pytest>=7.0.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0

@@ -40,6 +40,9 @@ class DrawDetector:
 
         High score = match likely to be a draw.
 
+        Phase 5 enhancement: More generous scoring to catch more draws.
+        Previous max was ~1.0, now can reach 1.2+ (capped at 1.0).
+
         Args:
             home_form: dict with 'points_per_game', 'goals_scored', etc.
             away_form: dict with 'points_per_game', 'goals_scored', etc.
@@ -53,10 +56,10 @@ class DrawDetector:
         """
         score = 0.0
 
-        # Factor 1: Even form (0.3 points max)
+        # Factor 1: Even form (0.35 points max, was 0.3)
         score += self._score_even_form(home_form, away_form)
 
-        # Factor 2: Close baseline (0.3 points max)
+        # Factor 2: Close baseline (0.35 points max, was 0.3)
         score += self._score_close_baseline(baseline)
 
         # Factor 3: Low-scoring expected (0.2 points max)
@@ -66,23 +69,31 @@ class DrawDetector:
         if h2h_stats:
             score += self._score_h2h_draws(h2h_stats)
 
+        # Note: Max possible is now 1.1 (0.35 + 0.35 + 0.2 + 0.2)
+        # This makes it easier to reach high draw likelihood
         return min(score, 1.0)
 
     def _score_even_form(self, home_form: Dict, away_form: Dict) -> float:
         """
         Score based on how evenly matched the teams are.
 
-        Returns: 0.0 to 0.3
+        Phase 5 fix: More aggressive thresholds (was too conservative).
+        Draws occur in ~25% of matches, but we're only predicting 12.5%.
+
+        Returns: 0.0 to 0.35 (increased from 0.3)
         """
         home_ppg = home_form.get('points_per_game', 1.5)
         away_ppg = away_form.get('points_per_game', 1.5)
 
         form_diff = abs(home_ppg - away_ppg)
 
-        if form_diff < 0.3:
-            return 0.3  # Very even
-        elif form_diff < 0.6:
-            return 0.15  # Somewhat even
+        # More aggressive thresholds to catch more potential draws
+        if form_diff < 0.4:  # Was 0.3
+            return 0.35  # Very even (increased from 0.3)
+        elif form_diff < 0.8:  # Was 0.6
+            return 0.20  # Somewhat even (increased from 0.15)
+        elif form_diff < 1.2:  # New tier
+            return 0.10  # Moderately matched
         else:
             return 0.0  # Clear favorite
 
@@ -92,7 +103,10 @@ class DrawDetector:
 
         If no clear favorite, draw more likely.
 
-        Returns: 0.0 to 0.3
+        Phase 5 fix: Bookmakers are conservative on draws but good at identifying
+        close matches. If baseline is close, that's a strong draw signal.
+
+        Returns: 0.0 to 0.35 (increased from 0.3)
         """
         home_prob = baseline.get('home_prob', 0.33)
         draw_prob = baseline.get('draw_prob', 0.33)
@@ -100,14 +114,21 @@ class DrawDetector:
 
         baseline_max = max(home_prob, draw_prob, away_prob)
 
-        # Also check if draw is already the baseline favorite
+        # Check if draw is already the baseline favorite
         if draw_prob == baseline_max:
-            return 0.3  # Baseline already favors draw
+            return 0.35  # Baseline already favors draw (increased)
 
-        if baseline_max < 0.45:
-            return 0.3  # No team above 45% - very close
-        elif baseline_max < 0.55:
-            return 0.15  # No team above 55% - close
+        # Check if draw is close to the max (within 10%)
+        if draw_prob >= baseline_max - 0.10:
+            return 0.30  # Draw is competitive
+
+        # More aggressive thresholds
+        if baseline_max < 0.48:  # Was 0.45
+            return 0.35  # No team above 48% - very close
+        elif baseline_max < 0.58:  # Was 0.55
+            return 0.20  # No team above 58% - close (increased from 0.15)
+        elif baseline_max < 0.68:  # New tier
+            return 0.10  # Moderate favorite
         else:
             return 0.0  # Clear favorite
 
@@ -170,9 +191,76 @@ class DrawDetector:
         else:
             return 0.0  # Normal/low draw rate
 
+    def enforce_minimum_draw(
+        self,
+        probabilities: Dict[str, float],
+        draw_likelihood: float,
+        min_draw: float = 0.15
+    ) -> Dict[str, float]:
+        """
+        Enforce minimum draw probability based on draw likelihood.
+
+        Phase 5 fix: Post-processing to prevent draw suppression.
+        Since draws happen in ~25% of matches, they should rarely be below 15%.
+
+        Args:
+            probabilities: Dict with 'home', 'draw', 'away' probabilities
+            draw_likelihood: Score from detect_draw_likelihood()
+            min_draw: Minimum draw probability (default 0.15 = 15%)
+
+        Returns:
+            Adjusted probabilities with enforced draw minimum
+        """
+        home = probabilities.get('home', 0.33)
+        draw = probabilities.get('draw', 0.33)
+        away = probabilities.get('away', 0.33)
+
+        # Determine minimum based on draw likelihood
+        if draw_likelihood >= 0.7:
+            min_draw = max(min_draw, 0.35)  # High likelihood: 35% minimum
+        elif draw_likelihood >= 0.5:
+            min_draw = max(min_draw, 0.28)  # Elevated: 28% minimum
+        elif draw_likelihood >= 0.4:
+            min_draw = max(min_draw, 0.23)  # Moderate: 23% minimum
+        elif draw_likelihood >= 0.3:
+            min_draw = max(min_draw, 0.18)  # Some signal: 18% minimum
+
+        # If draw is already above minimum, no adjustment needed
+        if draw >= min_draw:
+            return {'home': home, 'draw': draw, 'away': away}
+
+        # Boost draw to minimum, reduce home/away proportionally
+        boost_needed = min_draw - draw
+        non_draw_total = home + away
+
+        if non_draw_total > 0:
+            # Reduce home and away proportionally
+            reduction_ratio = (1 - min_draw) / non_draw_total
+            new_home = home * reduction_ratio
+            new_away = away * reduction_ratio
+        else:
+            # Fallback if somehow home+away = 0
+            new_home = (1 - min_draw) / 2
+            new_away = (1 - min_draw) / 2
+
+        # Ensure probabilities sum to 1.0
+        total = new_home + min_draw + new_away
+        new_home /= total
+        min_draw /= total
+        new_away /= total
+
+        return {
+            'home': new_home,
+            'draw': min_draw,
+            'away': new_away
+        }
+
     def get_draw_warning(self, draw_likelihood: float) -> Optional[str]:
         """
         Generate a warning message for the LLM prompt based on draw likelihood.
+
+        Phase 5 fix: Make warnings more directive and specific about probabilities.
+        We're only getting 12.5% draw accuracy - need stronger signals.
 
         Args:
             draw_likelihood: Score from detect_draw_likelihood()
@@ -182,23 +270,41 @@ class DrawDetector:
         """
         if draw_likelihood >= 0.7:
             return (
-                "⚠️ HIGH DRAW LIKELIHOOD DETECTED (score: {:.2f})\n"
-                "This match shows strong draw indicators:\n"
-                "- Evenly matched teams\n"
-                "- Close baseline probabilities\n"
-                "- Historical draw pattern\n"
-                "Consider: Draw probability should be 35-45%, not the typical 20-25%."
+                "🚨 CRITICAL: HIGH DRAW LIKELIHOOD DETECTED (score: {:.2f}) 🚨\n"
+                "═══════════════════════════════════════════════════════════\n"
+                "STRONG DRAW INDICATORS PRESENT:\n"
+                "✓ Teams are evenly matched (similar form)\n"
+                "✓ Bookmakers show no clear favorite\n"
+                "✓ Historical draw pattern or low-scoring expected\n"
+                "\n"
+                "🎯 REQUIRED ACTION:\n"
+                "→ Draw probability MUST be 35-50% (not 20-25%)\n"
+                "→ Neither team should exceed 40% probability\n"
+                "→ This is a DRAW-LIKELY match, treat it as such\n"
+                "═══════════════════════════════════════════════════════════"
             ).format(draw_likelihood)
         elif draw_likelihood >= 0.5:
             return (
-                "⚠️ ELEVATED DRAW LIKELIHOOD (score: {:.2f})\n"
-                "This is a close match. Draw probability should be ~30-35%.\n"
-                "Avoid extreme predictions (>60% for any outcome)."
+                "⚠️ ELEVATED DRAW LIKELIHOOD DETECTED (score: {:.2f})\n"
+                "────────────────────────────────────────────────────────\n"
+                "This is a CLOSE, EVEN match.\n"
+                "\n"
+                "🎯 RECOMMENDED APPROACH:\n"
+                "→ Draw probability should be 30-40%\n"
+                "→ Avoid extreme predictions (>55% for any single outcome)\n"
+                "→ When teams are this evenly matched, draws are common\n"
+                "────────────────────────────────────────────────────────"
             ).format(draw_likelihood)
         elif draw_likelihood >= 0.4:
             return (
-                "📊 Close match detected (draw score: {:.2f})\n"
-                "Ensure draw probability is at least 25-30%."
+                "📊 Moderately Close Match (draw score: {:.2f})\n"
+                "───────────────────────────────────────────────\n"
+                "⚠️ Ensure draw probability is AT LEAST 25-30%\n"
+                "   (Real draw rate is ~25% league-wide)"
+            ).format(draw_likelihood)
+        elif draw_likelihood >= 0.3:
+            return (
+                "📊 Draw possible (score: {:.2f}) - Keep draw at 20-25% minimum"
             ).format(draw_likelihood)
         else:
             return None

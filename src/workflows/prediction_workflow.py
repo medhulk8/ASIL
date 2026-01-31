@@ -483,7 +483,7 @@ def create_workflow_components(
 
             return {
                 "match": match,
-                "skip_web_search": False,
+                "skip_web_search": state.get("skip_web_search", False),  # Preserve from initial state
                 "iteration_count": 0
             }
 
@@ -580,7 +580,8 @@ def create_workflow_components(
                 "baseline": baseline,
                 "home_advanced_stats": home_advanced,
                 "away_advanced_stats": away_advanced,
-                "h2h_stats": h2h_stats
+                "h2h_stats": h2h_stats,
+                "skip_web_search": state.get("skip_web_search", False)  # Preserve this flag
             }
 
         except Exception as e:
@@ -991,7 +992,7 @@ def should_retry_prediction(state: PredictionState) -> Literal["llm_predictor", 
 
 def create_prediction_workflow(
     components: Dict[str, Callable],
-    skip_web_search: bool = False
+    skip_web_search: bool = True
 ) -> StateGraph:
     """
     Create the prediction workflow graph.
@@ -1061,7 +1062,7 @@ def build_workflow(
     kg=None,
     web_rag=None,
     ollama_model: str = "llama3.1:8b",
-    skip_web_search: bool = False
+    skip_web_search: bool = True
 ):
     """
     Convenience function to build workflow in one call.
@@ -1153,37 +1154,23 @@ def build_prediction_graph(
         """
         Decision: Should we do web search?
 
-        - If baseline is very confident (>75%), skip web search
-        - If skip_web_search flag is set, skip
-        - If there's an error, skip
-        - Otherwise, do web search for more context
+        DISABLED BY DEFAULT - Web search was found to degrade accuracy by -35.6%
+        Based on Phase 5 analysis, we always skip web search now.
+
+        The flag can be overridden by setting skip_web_search=False in initial state.
         """
-        # Check for errors or explicit skip
-        if state.get("error"):
-            return "skip_web"
-        if state.get("skip_web_search", False):
-            return "skip_web"
-
-        # Check baseline confidence
-        baseline = state.get("baseline", {})
-        if baseline:
-            max_baseline_prob = max(
-                baseline.get('home_prob', 0),
-                baseline.get('draw_prob', 0),
-                baseline.get('away_prob', 0)
-            )
-
+        # Always skip web search unless explicitly requested
+        if not state.get("skip_web_search", True):  # Default to True (skip)
             verbose = state.get("verbose", True)
-            if max_baseline_prob > 0.75:
-                if verbose:
-                    print(f"   ⚡ Baseline confident ({max_baseline_prob:.0%}) - skipping web search")
-                return "skip_web"
-            else:
-                if verbose:
-                    print(f"   🔍 Baseline uncertain ({max_baseline_prob:.0%}) - doing web search")
-                return "do_web"
+            if verbose:
+                print(f"   🔍 Web search explicitly enabled")
+            return "do_web"
 
-        return "do_web"
+        # Skip web search (default behavior)
+        verbose = state.get("verbose", True)
+        if verbose:
+            print(f"   ⚡ Web search disabled (improves accuracy)")
+        return "skip_web"
 
     graph.add_conditional_edges(
         "kg_query",
